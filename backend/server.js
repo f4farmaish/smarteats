@@ -458,7 +458,6 @@ app.use((error, req, res, next) => {
   if (error.name === "ValidationError") return res.status(400).json({ error: error.message });
   return res.status(500).json({ error: "Something went wrong on the server" });
 });
-
 async function start() {
   if (!process.env.MONGODB_URI) throw new Error("MONGODB_URI is not configured");
   await mongoose.connect(process.env.MONGODB_URI);
@@ -467,10 +466,20 @@ async function start() {
 }
 
 if (require.main === module) {
+  // Local development — normal server, app.listen() chalega
   start().catch(error => {
     console.error("Unable to start SmartEats API:", error.message);
     process.exit(1);
   });
+} else if (process.env.VERCEL) {
+  // Vercel serverless — app.listen() kabhi call nahi karna, Vercel khud
+  // requests handle karta hai. Sirf MongoDB connect karna hai (ek dafa,
+  // cold start pe).
+  if (mongoose.connection.readyState === 0) {
+    mongoose.connect(process.env.MONGODB_URI).catch(error => {
+      console.error("MongoDB connection failed:", error.message);
+    });
+  }
 }
 
-module.exports = { app, start, syncMeals };
+module.exports = app;
