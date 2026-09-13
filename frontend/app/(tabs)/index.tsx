@@ -4,7 +4,7 @@ export default function TabOneScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>we are currenlty working on this feature</Text>
-      <Text style={styles.text}>it will appear here once it's ready.</Text>
+      <Text style={styles.text}>farmaish and gahzanfar are working on more features.</Text>
     </View>
   );
 }

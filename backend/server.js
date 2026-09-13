@@ -350,11 +350,59 @@ app.post("/api/ai/transcribe", upload.single("audio"), async (req, res, next) =>
   }
 });
 
-
 app.post("/api/ai/scan-food", upload.single("image"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Image file is required" });
-    if (!process.env.GEMINI_API_KEY || !process.env.GEMINI_MODEL) return res.status(503).json({ error: "AI service is not configured" });
+
+    // TIER 1 + 2: Pehle apna trained Python model service try karo
+    // (Desi model + Food-101 model, dono isi service ke andar chalte hain)
+    let ownModelResult = null;
+    try {
+      const form = new FormData();
+      form.append(
+        "image",
+        new Blob([req.file.buffer], { type: req.file.mimetype || "image/jpeg" }),
+        req.file.originalname || "photo.jpg"
+      );
+      const modelResponse = await fetch((process.env.FOOD_MODEL_URL || "http://localhost:5001") + "/predict", {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(40000),
+      });
+      if (modelResponse.ok) {
+        ownModelResult = await modelResponse.json();
+      } else {
+        console.error("Apna model service ne error diya, status:", modelResponse.status);
+      }
+    } catch (modelError) {
+      console.error("Apna model service tak nahi pohanch saka, Gemini fallback use hoga:", modelError.message);
+    }
+
+    // Agar apna model confident hai, usi ka jawab wapis bhejo — Gemini call hi nahi hogi
+    if (ownModelResult && ownModelResult.isConfident) {
+      return res.json({
+        foodName: ownModelResult.foodName,
+        estimatedCalories: ownModelResult.estimatedCalories,
+        protein: ownModelResult.protein,
+        carbs: ownModelResult.carbs,
+        fat: ownModelResult.fat,
+        confidence: ownModelResult.confidence,
+        recognizedBy: ownModelResult.recognizedBy,
+        notes: ownModelResult.notes,
+      });
+    }
+
+    // TIER 3: Gemini Vision — safety net, sirf jab apna model confident na ho
+    // ya Python service chal hi na rahi ho
+    if (!process.env.GEMINI_API_KEY || !process.env.GEMINI_MODEL) {
+      // Apna model unconfident tha aur Gemini bhi available nahi — jo bhi mila
+      // wahi bhej do, kam se kam koi jawab to mile
+      if (ownModelResult) {
+        return res.json({ ...ownModelResult, notes: ownModelResult.notes + " (Low confidence — AI fallback not configured)" });
+      }
+      return res.status(503).json({ error: "AI service is not configured" });
+    }
+
     const prompt = [
       "Analyze the food or dish in this image for the SmartEats nutrition app.",
       "Return ONLY a JSON object with exactly these keys: foodName, estimatedCalories, protein, carbs, fat, confidence, notes.",
@@ -367,7 +415,6 @@ app.post("/api/ai/scan-food", upload.single("image"), async (req, res, next) => 
       generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
     }) });
     const raw = data.candidates?.[0]?.content?.parts?.map(part => part.text || "").join("").trim() || "";
-    console.log("GEMINI RAW RESPONSE:", raw);
     const cleaned = raw.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
@@ -390,14 +437,22 @@ app.post("/api/ai/scan-food", upload.single("image"), async (req, res, next) => 
     if (!parsed.foodName || !confidence || numbers.some(number => !Number.isFinite(number))) {
       const error = new Error("Gemini returned an invalid food scan shape"); error.code = "INVALID_FOOD_SCAN"; throw error;
     }
-    return res.json({ foodName: String(parsed.foodName), estimatedCalories: Math.round(numbers[0]), protein: Math.round(numbers[1]), carbs: Math.round(numbers[2]), fat: Math.round(numbers[3]), confidence, notes: String(parsed.notes || parsed.portionNotes || "Estimates depend on the visible serving size.") });
+    return res.json({
+      foodName: String(parsed.foodName),
+      estimatedCalories: Math.round(numbers[0]),
+      protein: Math.round(numbers[1]),
+      carbs: Math.round(numbers[2]),
+      fat: Math.round(numbers[3]),
+      confidence,
+      recognizedBy: "gemini_fallback",
+      notes: String(parsed.notes || "Estimates depend on the visible serving size. Recognized via general-purpose AI fallback."),
+    });
   } catch (error) {
     console.error("Food scan failed:", error);
     if (error instanceof SyntaxError || error?.code === "INVALID_FOOD_SCAN") return res.status(502).json({ error: "Gemini returned an invalid food scan response" });
     return next(error);
   }
 });
-
 app.use((error, req, res, next) => {
   console.error(error);
   if (error.name === "ValidationError") return res.status(400).json({ error: error.message });
